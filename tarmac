@@ -1,0 +1,256 @@
+#!/usr/bin/env bash
+# tarmac — archive and extract directories with parallel gzip, progress, and verification.
+set -euo pipefail
+
+# Compression level. 6 is the sweet spot; 9 trades a lot of CPU for marginal size.
+LEVEL=6
+
+JOBS=1
+
+bold=""
+red=""
+green=""
+blue=""
+cyan=""
+reset=""
+
+if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+    bold=$'\033[1m'
+    red=$'\033[31m'
+    green=$'\033[32m'
+    blue=$'\033[34m'
+    cyan=$'\033[36m'
+    reset=$'\033[0m'
+fi
+
+info() { printf '%s[INFO]%s %s\n' "$cyan" "$reset" "$*"; }
+run() { printf '%s[RUN]%s  %s\n' "$blue" "$reset" "$*"; }
+ok() { printf '%s[OK]%s   %s\n' "$green" "$reset" "$*"; }
+err() { printf '%s[ERR]%s  %s\n' "$red" "$reset" "$*" >&2; }
+
+temp_file=""
+cleanup() {
+    [[ -n "$temp_file" && -f "$temp_file" ]] && rm -f -- "$temp_file"
+    return 0
+}
+trap cleanup EXIT
+
+usage() {
+    cat <<EOF
+Usage:
+  $0 [-j jobs] a <target_directory> [destination_directory]
+  $0 [-j jobs] d <archive.tar.gz> [destination_directory]
+
+Archives a directory as a parallel-gzipped tarball or extracts a tarball.
+Destination defaults to '.'.
+Jobs defaults to most CPU cores, capped at 8, leaving one core free.
+EOF
+}
+
+check_dependencies() {
+    local cmd
+    for cmd in awk basename cut date df dirname du gzip mkdir mktemp mv nproc numfmt pigz printf pv realpath tar tail wc; do
+        command -v "$cmd" >/dev/null \
+            || { err "Required command '$cmd' not found."; return 1; }
+    done
+}
+
+configure_jobs() {
+    # Use most cores, capped at 8, leaving one for the rest of the system.
+    local cores
+    cores=$(nproc)
+    if (( cores <= 1 )); then
+        JOBS=1
+    elif (( cores > 8 )); then
+        JOBS=8
+    else
+        JOBS=$(( cores - 1 ))
+    fi
+}
+
+parse_options() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -j | --jobs | --cpu | --cpus)
+                [[ $# -ge 2 ]] || { err "$1 requires a numeric argument."; return 1; }
+                [[ "$2" =~ ^[1-9][0-9]*$ ]] || { err "$1 must be a positive integer."; return 1; }
+                JOBS=$2
+                shift 2
+                ;;
+            --jobs=* | --cpu=* | --cpus=*)
+                local value=${1#*=}
+                [[ "$value" =~ ^[1-9][0-9]*$ ]] || { err "${1%%=*} must be a positive integer."; return 1; }
+                JOBS=$value
+                shift
+                ;;
+            --)
+                shift
+                break
+                ;;
+            -h | --help | help)
+                ARGS=("$1")
+                return 0
+                ;;
+            -*)
+                err "Unknown option '$1'."
+                return 1
+                ;;
+            *)
+                break
+                ;;
+        esac
+    done
+
+    set -- "$@"
+    ARGS=("$@")
+}
+
+archive_directory() {
+    if [[ $# -lt 1 || $# -gt 2 ]]; then
+        usage
+        return 1
+    fi
+
+    local target_dir dest_dir
+    target_dir=$(realpath -m "$1")
+    dest_dir=$(realpath -m "${2:-.}")
+    [[ -d "$target_dir" ]] \
+        || { err "'$target_dir' is not a directory."; return 1; }
+    mkdir -p -- "$dest_dir"
+
+    # Both sides in bytes — the original compared bytes (du -sb) against 1K-blocks (df).
+    local required available
+    required=$(du -sb "$target_dir" | cut -f1)
+    available=$(df -B1 --output=avail "$dest_dir" | tail -n1)
+    if (( available < required )); then
+        err "Need $(numfmt --to=iec "$required") at $dest_dir, only $(numfmt --to=iec "$available") free."
+        return 1
+    fi
+
+    local stamp output
+    stamp=$(date +"%Y%m%d_%H%M%S")          # 24-hour, lex-sortable
+    local target_base target_parent
+    local -a tar_excludes
+    target_base=$(basename "$target_dir")
+    target_parent=$(dirname "$target_dir")
+    output="$dest_dir/${target_base}_$stamp.tar.gz"
+    temp_file=$(mktemp --tmpdir="$dest_dir" ".${target_base}_${stamp}.XXXXXX.tar.gz.tmp")
+
+    tar_excludes=()
+    local dest_relative
+    dest_relative=$(realpath --relative-to="$target_dir" "$dest_dir")
+    if [[ "$dest_relative" != "." && "$dest_relative" != ..* ]]; then
+        tar_excludes+=(--exclude="$(realpath --relative-to="$target_parent" "$dest_dir")")
+    elif [[ "$(realpath --relative-to="$target_dir" "$temp_file")" != ..* ]]; then
+        tar_excludes+=(--exclude="$(realpath --relative-to="$target_parent" "$temp_file")")
+    fi
+
+    info "Source:      ${bold}$target_dir${reset}"
+    info "Destination: ${bold}$output${reset}"
+    info "Size:        ${bold}$(numfmt --to=iec "$required")${reset}"
+    info "Workers:     ${bold}$JOBS${reset}"
+
+    run "Archiving..."
+    tar "${tar_excludes[@]}" \
+        -I "pv -p -t -e -r -b -s $required | pigz -$LEVEL -p$JOBS" \
+        -cf "$temp_file" \
+        -C "$target_parent" "$target_base"
+
+    run "Verifying..."
+    gzip -t "$temp_file"
+
+    mv -f -- "$temp_file" "$output"
+    ok "Archive verified"
+    ok "Done: ${bold}$output${reset}"
+}
+
+validate_archive_paths() {
+    local archive=$1
+
+    if tar -tzf "$archive" 2>/dev/null | awk '
+        $0 == "" || $0 ~ /^\// || $0 ~ /(^|\/)\.\.($|\/)/ { bad = 1 }
+        END { exit bad }
+    '; then
+        return 0
+    fi
+
+    err "Archive contains unsafe paths."
+    return 1
+}
+
+extract_archive() {
+    if [[ $# -lt 1 || $# -gt 2 ]]; then
+        usage
+        return 1
+    fi
+
+    local archive dest_dir
+    archive=$(realpath -m "$1")
+    dest_dir=$(realpath -m "${2:-.}")
+
+    [[ -f "$archive" ]] \
+        || { err "'$archive' is not a file."; return 1; }
+
+    mkdir -p -- "$dest_dir"
+
+    local archive_size required available
+    archive_size=$(wc -c < "$archive")
+
+    run "Verifying..."
+    gzip -t "$archive"
+    validate_archive_paths "$archive"
+
+    required=$(gzip -dc -- "$archive" | wc -c)
+    available=$(df -B1 --output=avail "$dest_dir" | tail -n1)
+    if (( available < required )); then
+        err "Need $(numfmt --to=iec "$required") at $dest_dir, only $(numfmt --to=iec "$available") free."
+        return 1
+    fi
+
+    info "Archive:     ${bold}$archive${reset}"
+    info "Destination: ${bold}$dest_dir${reset}"
+    info "Size:        ${bold}$(numfmt --to=iec "$archive_size") compressed${reset}"
+    info "Unpacked:    ${bold}$(numfmt --to=iec "$required")${reset}"
+    info "Workers:     ${bold}$JOBS${reset}"
+
+    run "Extracting..."
+    pv -p -t -e -r -b -s "$archive_size" "$archive" \
+        | pigz -dc -p"$JOBS" \
+        | tar --no-same-owner -xf - -C "$dest_dir"
+
+    ok "Archive extracted"
+    ok "Done: ${bold}$dest_dir${reset}"
+}
+
+main() {
+    check_dependencies
+    configure_jobs
+    local -a ARGS
+    parse_options "$@"
+    set -- "${ARGS[@]}"
+
+    if [[ $# -lt 1 ]]; then
+        usage
+        return 1
+    fi
+
+    case "$1" in
+        a)
+            shift
+            archive_directory "$@"
+            ;;
+        d)
+            shift
+            extract_archive "$@"
+            ;;
+        -h | --help | help)
+            usage
+            ;;
+        *)
+            usage
+            return 1
+            ;;
+    esac
+}
+
+main "$@"
