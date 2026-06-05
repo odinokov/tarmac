@@ -1,7 +1,7 @@
 # tarmac
 
 `tarmac` is a small Bash utility for archiving and restoring directories with
-parallel gzip compression and progress output.
+parallel `pigz` compression and progress output.
 
 ## Requirements
 
@@ -9,7 +9,6 @@ Install these command-line tools first:
 
 - `bash`
 - `tar`
-- `gzip`
 - `pigz`
 - `pv`
 - GNU core utilities: `awk`, `df`, `du`, `realpath`, `numfmt`, `mktemp`, `wc`
@@ -17,7 +16,7 @@ Install these command-line tools first:
 On Debian/Ubuntu:
 
 ```bash
-sudo apt install tar gzip pigz pv coreutils gawk
+sudo apt install tar pigz pv coreutils gawk
 ```
 
 On macOS with Homebrew:

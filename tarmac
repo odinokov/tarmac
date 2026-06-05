@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tarmac — archive and extract directories with parallel gzip and progress.
+# tarmac — archive and extract directories with pigz compression and progress.
 set -euo pipefail
 
 # Compression level. 6 is the sweet spot; 9 trades a lot of CPU for marginal size.
@@ -41,7 +41,7 @@ Usage:
   $0 [-j jobs] a <target_directory> [destination_directory]
   $0 [-j jobs] d <archive.tar.gz> [destination_directory]
 
-Archives a directory as a parallel-gzipped tarball or extracts a tarball.
+Archives a directory as a pigz-compressed tarball or extracts a tarball.
 Destination defaults to '.'.
 Jobs defaults to most CPU cores, capped at 8, leaving one core free.
 EOF
@@ -49,7 +49,7 @@ EOF
 
 check_dependencies() {
     local cmd
-    for cmd in awk basename cut date df dirname du gzip mkdir mktemp mv nproc numfmt pigz printf pv realpath tar tail wc; do
+    for cmd in awk basename cut date df dirname du mkdir mktemp mv nproc numfmt pigz printf pv realpath tar tail wc; do
         command -v "$cmd" >/dev/null \
             || { err "Required command '$cmd' not found."; return 1; }
     done
@@ -195,7 +195,7 @@ extract_archive() {
 
     validate_archive_paths "$archive"
 
-    required=$(gzip -dc -- "$archive" | wc -c)
+    required=$(pigz -dc -p"$JOBS" -- "$archive" | wc -c)
     available=$(df -B1 --output=avail "$dest_dir" | tail -n1)
     if (( available < required )); then
         err "Need $(numfmt --to=iec "$required") at $dest_dir, only $(numfmt --to=iec "$available") free."
