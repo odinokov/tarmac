@@ -1,7 +1,7 @@
 # tarmac
 
 `tarmac` is a small Bash utility for archiving and restoring directories with
-parallel gzip compression, progress output, and verification.
+parallel gzip compression and progress output.
 
 ## Requirements
 
@@ -98,7 +98,8 @@ tarmac d ./backups/project_20260429_142927.tar.gz ./restore
 ## Notes
 
 - Archives are named `<directory>_YYYYMMDD_HHMMSS.tar.gz`.
-- The archive is verified with `gzip -t` before it is moved into place.
+- Archives are written to a temporary file in the destination directory and
+  moved into place only after `tar` and `pigz` finish successfully.
 - Extraction verifies the archive first and rejects unsafe absolute or `../`
   paths.
 - Set `NO_COLOR=1` to disable colored terminal output.

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tarmac — archive and extract directories with parallel gzip, progress, and verification.
+# tarmac — archive and extract directories with parallel gzip and progress.
 set -euo pipefail
 
 # Compression level. 6 is the sweet spot; 9 trades a lot of CPU for marginal size.
@@ -156,11 +156,8 @@ archive_directory() {
         -cf "$temp_file" \
         -C "$target_parent" "$target_base"
 
-    run "Verifying..."
-    gzip -t "$temp_file"
-
     mv -f -- "$temp_file" "$output"
-    ok "Archive verified"
+    ok "Archive created"
     ok "Done: ${bold}$output${reset}"
 }
 
