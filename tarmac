@@ -193,8 +193,6 @@ extract_archive() {
     local archive_size required available
     archive_size=$(wc -c < "$archive")
 
-    run "Verifying..."
-    gzip -t "$archive"
     validate_archive_paths "$archive"
 
     required=$(gzip -dc -- "$archive" | wc -c)

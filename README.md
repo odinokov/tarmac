@@ -100,8 +100,7 @@ tarmac d ./backups/project_20260429_142927.tar.gz ./restore
 - Archives are named `<directory>_YYYYMMDD_HHMMSS.tar.gz`.
 - Archives are written to a temporary file in the destination directory and
   moved into place only after `tar` and `pigz` finish successfully.
-- Extraction verifies the archive first and rejects unsafe absolute or `../`
-  paths.
+- Extraction rejects unsafe absolute or `../` paths before unpacking.
 - Set `NO_COLOR=1` to disable colored terminal output.
 
 ## License
