@@ -7,6 +7,9 @@ LEVEL=6
 
 JOBS=1
 
+# pv progress flags: percentage, timer, ETA, rate, bytes.
+PV_FLAGS="-p -t -e -r -b"
+
 bold=""
 red=""
 green=""
@@ -55,6 +58,16 @@ check_dependencies() {
     done
 }
 
+ensure_space() {
+    # Fail if dest_dir has fewer than `required` free bytes.
+    local dest_dir=$1 required=$2 available
+    available=$(df -B1 --output=avail "$dest_dir" | tail -n1)
+    if (( available < required )); then
+        err "Need $(numfmt --to=iec "$required") at $dest_dir, only $(numfmt --to=iec "$available") free."
+        return 1
+    fi
+}
+
 configure_jobs() {
     # Use most cores, capped at 8, leaving one for the rest of the system.
     local cores
@@ -101,7 +114,6 @@ parse_options() {
         esac
     done
 
-    set -- "$@"
     ARGS=("$@")
 }
 
@@ -118,14 +130,9 @@ archive_directory() {
         || { err "'$target_dir' is not a directory."; return 1; }
     mkdir -p -- "$dest_dir"
 
-    # Both sides in bytes — the original compared bytes (du -sb) against 1K-blocks (df).
-    local required available
+    local required
     required=$(du -sb "$target_dir" | cut -f1)
-    available=$(df -B1 --output=avail "$dest_dir" | tail -n1)
-    if (( available < required )); then
-        err "Need $(numfmt --to=iec "$required") at $dest_dir, only $(numfmt --to=iec "$available") free."
-        return 1
-    fi
+    ensure_space "$dest_dir" "$required" || return 1
 
     local stamp output
     stamp=$(date +"%Y%m%d_%H%M%S")          # 24-hour, lex-sortable
@@ -152,7 +159,7 @@ archive_directory() {
 
     run "Archiving..."
     tar "${tar_excludes[@]}" \
-        -I "pv -p -t -e -r -b -s $required | pigz -$LEVEL -p$JOBS" \
+        -I "pv $PV_FLAGS -s $required | pigz -$LEVEL -p$JOBS" \
         -cf "$temp_file" \
         -C "$target_parent" "$target_base"
 
@@ -164,7 +171,7 @@ archive_directory() {
 validate_archive_paths() {
     local archive=$1
 
-    if tar -tzf "$archive" 2>/dev/null | awk '
+    if pigz -dc -p"$JOBS" -- "$archive" 2>/dev/null | tar -tf - 2>/dev/null | awk '
         $0 == "" || $0 ~ /^\// || $0 ~ /(^|\/)\.\.($|\/)/ { bad = 1 }
         END { exit bad }
     '; then
@@ -190,17 +197,13 @@ extract_archive() {
 
     mkdir -p -- "$dest_dir"
 
-    local archive_size required available
+    local archive_size required
     archive_size=$(wc -c < "$archive")
 
     validate_archive_paths "$archive"
 
     required=$(pigz -dc -p"$JOBS" -- "$archive" | wc -c)
-    available=$(df -B1 --output=avail "$dest_dir" | tail -n1)
-    if (( available < required )); then
-        err "Need $(numfmt --to=iec "$required") at $dest_dir, only $(numfmt --to=iec "$available") free."
-        return 1
-    fi
+    ensure_space "$dest_dir" "$required" || return 1
 
     info "Archive:     ${bold}$archive${reset}"
     info "Destination: ${bold}$dest_dir${reset}"
@@ -209,7 +212,7 @@ extract_archive() {
     info "Workers:     ${bold}$JOBS${reset}"
 
     run "Extracting..."
-    pv -p -t -e -r -b -s "$archive_size" "$archive" \
+    pv $PV_FLAGS -s "$archive_size" "$archive" \
         | pigz -dc -p"$JOBS" \
         | tar --no-same-owner -xf - -C "$dest_dir"
 
